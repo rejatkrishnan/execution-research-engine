@@ -1,27 +1,19 @@
-"""Core limit-order-book primitives.
-
-The first implementation intentionally focuses on resting liquidity. Matching and
-trade generation will be layered on top of this book in later iterations.
-"""
+"""Core limit-order-book primitives with price-time-priority matching."""
 
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 
 class Side(str, Enum):
-    """Order side."""
-
     BUY = "buy"
     SELL = "sell"
 
 
 @dataclass(frozen=True, slots=True)
 class Order:
-    """A resting limit order."""
-
     order_id: str
     side: Side
     price: float
@@ -36,26 +28,66 @@ class Order:
             raise ValueError("quantity must be positive")
 
 
-class LimitOrderBook:
-    """In-memory limit order book with FIFO queues at each price level."""
+@dataclass(frozen=True, slots=True)
+class Fill:
+    taker_order_id: str
+    maker_order_id: str
+    price: float
+    quantity: float
 
+
+class LimitOrderBook:
     def __init__(self) -> None:
         self._bids: dict[float, OrderedDict[str, Order]] = {}
         self._asks: dict[float, OrderedDict[str, Order]] = {}
         self._orders: dict[str, Order] = {}
 
-    def add(self, order: Order) -> None:
-        """Add a resting order while preserving price-level insertion order."""
+    def add(self, order: Order) -> tuple[Fill, ...]:
+        """Submit a limit order, matching first and resting any remainder."""
         if order.order_id in self._orders:
             raise ValueError(f"duplicate order_id: {order.order_id}")
 
-        levels = self._bids if order.side is Side.BUY else self._asks
-        queue = levels.setdefault(order.price, OrderedDict())
-        queue[order.order_id] = order
-        self._orders[order.order_id] = order
+        remaining = order.quantity
+        fills: list[Fill] = []
+        opposite = self._asks if order.side is Side.BUY else self._bids
+
+        while remaining > 0 and self._crosses(order.side, order.price):
+            best_price = self.best_ask if order.side is Side.BUY else self.best_bid
+            assert best_price is not None
+            queue = opposite[best_price]
+
+            while remaining > 0 and queue:
+                maker_id, maker = next(iter(queue.items()))
+                traded = min(remaining, maker.quantity)
+                fills.append(Fill(order.order_id, maker_id, maker.price, traded))
+                remaining -= traded
+
+                if traded == maker.quantity:
+                    del queue[maker_id]
+                    del self._orders[maker_id]
+                else:
+                    updated = replace(maker, quantity=maker.quantity - traded)
+                    queue[maker_id] = updated
+                    self._orders[maker_id] = updated
+
+            if not queue:
+                del opposite[best_price]
+
+        if remaining > 0:
+            resting = replace(order, quantity=remaining)
+            levels = self._bids if resting.side is Side.BUY else self._asks
+            queue = levels.setdefault(resting.price, OrderedDict())
+            queue[resting.order_id] = resting
+            self._orders[resting.order_id] = resting
+
+        return tuple(fills)
+
+    def _crosses(self, side: Side, limit_price: float) -> bool:
+        if side is Side.BUY:
+            return self.best_ask is not None and limit_price >= self.best_ask
+        return self.best_bid is not None and limit_price <= self.best_bid
 
     def cancel(self, order_id: str) -> Order:
-        """Cancel an order and return the removed order."""
         try:
             order = self._orders.pop(order_id)
         except KeyError as exc:
@@ -70,28 +102,23 @@ class LimitOrderBook:
 
     @property
     def best_bid(self) -> float | None:
-        """Highest resting bid price."""
         return max(self._bids, default=None)
 
     @property
     def best_ask(self) -> float | None:
-        """Lowest resting ask price."""
         return min(self._asks, default=None)
 
     @property
     def spread(self) -> float | None:
-        """Top-of-book spread, or None when either side is empty."""
         if self.best_bid is None or self.best_ask is None:
             return None
         return self.best_ask - self.best_bid
 
     def level_quantity(self, side: Side, price: float) -> float:
-        """Total resting quantity at a price level."""
         levels = self._bids if side is Side.BUY else self._asks
         return sum(order.quantity for order in levels.get(price, {}).values())
 
     def orders_at(self, side: Side, price: float) -> tuple[Order, ...]:
-        """Orders at a price level in FIFO priority order."""
         levels = self._bids if side is Side.BUY else self._asks
         return tuple(levels.get(price, {}).values())
 
