@@ -29,6 +29,19 @@ class Order:
 
 
 @dataclass(frozen=True, slots=True)
+class MarketOrder:
+    order_id: str
+    side: Side
+    quantity: float
+
+    def __post_init__(self) -> None:
+        if not self.order_id:
+            raise ValueError("order_id must be non-empty")
+        if self.quantity <= 0:
+            raise ValueError("quantity must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class Fill:
     taker_order_id: str
     maker_order_id: str
@@ -47,19 +60,44 @@ class LimitOrderBook:
         if order.order_id in self._orders:
             raise ValueError(f"duplicate order_id: {order.order_id}")
 
-        remaining = order.quantity
-        fills: list[Fill] = []
-        opposite = self._asks if order.side is Side.BUY else self._bids
+        fills = self._match(order.order_id, order.side, order.quantity, order.price)
+        remaining = order.quantity - sum(fill.quantity for fill in fills)
 
-        while remaining > 0 and self._crosses(order.side, order.price):
-            best_price = self.best_ask if order.side is Side.BUY else self.best_bid
+        if remaining > 0:
+            resting = replace(order, quantity=remaining)
+            levels = self._bids if resting.side is Side.BUY else self._asks
+            queue = levels.setdefault(resting.price, OrderedDict())
+            queue[resting.order_id] = resting
+            self._orders[resting.order_id] = resting
+
+        return fills
+
+    def execute_market(self, order: MarketOrder) -> tuple[Fill, ...]:
+        """Execute immediately against available liquidity; never rest a remainder."""
+        if order.order_id in self._orders:
+            raise ValueError(f"duplicate order_id: {order.order_id}")
+        return self._match(order.order_id, order.side, order.quantity)
+
+    def _match(
+        self,
+        taker_order_id: str,
+        side: Side,
+        quantity: float,
+        limit_price: float | None = None,
+    ) -> tuple[Fill, ...]:
+        remaining = quantity
+        fills: list[Fill] = []
+        opposite = self._asks if side is Side.BUY else self._bids
+
+        while remaining > 0 and self._can_match(side, limit_price):
+            best_price = self.best_ask if side is Side.BUY else self.best_bid
             assert best_price is not None
             queue = opposite[best_price]
 
             while remaining > 0 and queue:
                 maker_id, maker = next(iter(queue.items()))
                 traded = min(remaining, maker.quantity)
-                fills.append(Fill(order.order_id, maker_id, maker.price, traded))
+                fills.append(Fill(taker_order_id, maker_id, maker.price, traded))
                 remaining -= traded
 
                 if traded == maker.quantity:
@@ -73,19 +111,17 @@ class LimitOrderBook:
             if not queue:
                 del opposite[best_price]
 
-        if remaining > 0:
-            resting = replace(order, quantity=remaining)
-            levels = self._bids if resting.side is Side.BUY else self._asks
-            queue = levels.setdefault(resting.price, OrderedDict())
-            queue[resting.order_id] = resting
-            self._orders[resting.order_id] = resting
-
         return tuple(fills)
 
-    def _crosses(self, side: Side, limit_price: float) -> bool:
+    def _can_match(self, side: Side, limit_price: float | None) -> bool:
+        best_price = self.best_ask if side is Side.BUY else self.best_bid
+        if best_price is None:
+            return False
+        if limit_price is None:
+            return True
         if side is Side.BUY:
-            return self.best_ask is not None and limit_price >= self.best_ask
-        return self.best_bid is not None and limit_price <= self.best_bid
+            return limit_price >= best_price
+        return limit_price <= best_price
 
     def cancel(self, order_id: str) -> Order:
         try:

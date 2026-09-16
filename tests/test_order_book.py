@@ -1,5 +1,5 @@
 import pytest
-from execution_engine import Fill, LimitOrderBook, Order, Side
+from execution_engine import Fill, LimitOrderBook, MarketOrder, Order, Side
 
 
 def test_best_prices_and_spread() -> None:
@@ -77,3 +77,27 @@ def test_non_crossing_order_rests_without_fill() -> None:
     assert fills == ()
     assert book.best_bid == 100.0
     assert book.best_ask == 101.0
+
+
+def test_market_order_sweeps_multiple_price_levels() -> None:
+    book = LimitOrderBook()
+    book.add(Order("a1", Side.SELL, 101.0, 1.0))
+    book.add(Order("a2", Side.SELL, 102.0, 2.0))
+    fills = book.execute_market(MarketOrder("m1", Side.BUY, 2.5))
+    assert fills == (Fill("m1", "a1", 101.0, 1.0), Fill("m1", "a2", 102.0, 1.5))
+    assert book.orders_at(Side.SELL, 102.0) == (Order("a2", Side.SELL, 102.0, 0.5),)
+
+
+def test_unfilled_market_quantity_does_not_rest() -> None:
+    book = LimitOrderBook()
+    book.add(Order("a1", Side.SELL, 101.0, 1.0))
+    fills = book.execute_market(MarketOrder("m1", Side.BUY, 3.0))
+    assert fills == (Fill("m1", "a1", 101.0, 1.0),)
+    assert len(book) == 0
+    assert book.best_bid is None
+    assert book.best_ask is None
+
+
+def test_market_order_rejects_nonpositive_quantity() -> None:
+    with pytest.raises(ValueError, match="quantity must be positive"):
+        MarketOrder("m1", Side.BUY, 0.0)
