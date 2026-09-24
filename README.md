@@ -2,24 +2,24 @@
 
 A research codebase for studying market microstructure, transaction costs, and algorithmic execution.
 
-The project will grow incrementally from a deterministic limit order book into a small execution research stack with matching, market-data replay, TWAP/VWAP/POV strategies, slippage and impact models, transaction-cost analysis, and benchmarking.
+The project is growing incrementally from a deterministic limit order book into a small execution research stack with matching, market-data replay, TWAP/VWAP/POV strategies, slippage and impact models, transaction-cost analysis, and benchmarking.
 
-## Current milestone
+## Current capabilities
 
-The first milestone implements the resting order-book core:
-
-- typed buy and sell orders
-- FIFO priority within each price level
-- best bid, best ask, and spread
-- price-level depth
+- typed limit and market orders
+- price-time-priority matching with partial fills
+- best bid, best ask, spread, and price-level depth
 - order cancellation and input validation
+- fill events and multi-level market-order sweeps
+- execution VWAP and signed slippage analytics
+- implementation shortfall decomposition into execution and opportunity cost
 
 ## Development
 
-```bash
+~~~bash
 python -m pip install -e '.[dev]'
 pytest
-```
+~~~
 
 ## Roadmap
 
